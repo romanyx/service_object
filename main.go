@@ -7,12 +7,20 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/pkg/errors"
 	"gopkg.in/go-playground/validator.v9"
 )
 
 const (
 	passwordMismatch = "password mismatch"
 	emailExists      = "email exists"
+	validationMsg    = "you have validation errors"
+)
+
+var (
+	// ErrEmailExists returns when given email is present
+	// in storage.
+	ErrEmailExists = errors.New("email already exists")
 )
 
 func main() {
@@ -30,9 +38,15 @@ func main() {
 // NewServer prepares http server.
 func NewServer(addr string, r Repository) *http.Server {
 	mux := http.NewServeMux()
+
 	h := RegistrationHandler{
-		Validator:  validator.New(),
-		Repository: r,
+		Registrater: &Service{
+			Validater: &PlayValidator{
+				Validater:  validator.New(),
+				Repository: r,
+			},
+			Repository: r,
+		},
 	}
 
 	mux.Handle("/registrate", &h)
@@ -47,14 +61,51 @@ func NewServer(addr string, r Repository) *http.Server {
 
 // Repository is a data access layer.
 type Repository interface {
-	Exists(email string) (bool, error)
+	Unique(email string) error
 	Create(*Form) (*User, error)
+}
+
+// Validater validation abstraction.
+type Validater interface {
+	Validate(*Form) error
+}
+
+// ValidationErrors holds validation errors.
+type ValidationErrors map[string]string
+
+// Error implements error interface.
+func (v ValidationErrors) Error() string {
+	return validationMsg
+}
+
+// Service holds data required for registration.
+type Service struct {
+	Validater
+	Repository
+}
+
+// Registrate holds registration domain logic.
+func (s *Service) Registrate(f *Form) (*User, error) {
+	if err := s.Validater.Validate(f); err != nil {
+		return nil, errors.Wrap(err, "validater validate")
+	}
+
+	user, err := s.Create(f)
+	if err != nil {
+		return nil, errors.Wrap(err, "repository create")
+	}
+
+	return user, nil
+}
+
+// Registrater abstraction for registration service.
+type Registrater interface {
+	Registrate(*Form) (*User, error)
 }
 
 // RegistrationHandler for regisration requests.
 type RegistrationHandler struct {
-	Validator *validator.Validate
-	Repository
+	Registrater
 }
 
 // ServerHTTP implements http.Handler.
@@ -65,39 +116,15 @@ func (h *RegistrationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	validations := make(map[string]string)
-
-	err := h.Validator.Struct(f)
+	u, err := h.Registrate(&f)
 	if err != nil {
-		if vs, ok := err.(validator.ValidationErrors); ok {
-			for _, v := range vs {
-				validations[v.Tag()] = fmt.Sprintf("%s is invalid", v.Tag())
-			}
+		switch v := errors.Cause(err).(type) {
+		case ValidationErrors:
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(v)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
 		}
-	}
-
-	if f.Password != f.PasswordConfirmation {
-		validations["password"] = passwordMismatch
-	}
-
-	exists, err := h.Exists(f.Email)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if exists {
-		validations["email"] = emailExists
-	}
-
-	if len(validations) > 0 {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		json.NewEncoder(w).Encode(validations)
-		return
-	}
-
-	u, err := h.Create(&f)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -123,15 +150,15 @@ type MemStore struct {
 	Users []User
 }
 
-// Exists checks if a email exists in the database.
-func (s *MemStore) Exists(email string) (bool, error) {
+// Unique checks if a email exists in the database.
+func (s *MemStore) Unique(email string) error {
 	for _, u := range s.Users {
 		if u.Email == email {
-			return true, nil
+			return ErrEmailExists
 		}
 	}
 
-	return false, nil
+	return nil
 }
 
 // Create creates user in the database for a form.
@@ -145,4 +172,42 @@ func (s *MemStore) Create(f *Form) (*User, error) {
 	s.Users = append(s.Users, u)
 
 	return &u, nil
+}
+
+// PlayValidator holds registration form validations.
+type PlayValidator struct {
+	Validater *validator.Validate
+	Repository
+}
+
+// Validate implements Validater.
+func (v *PlayValidator) Validate(f *Form) error {
+	validations := make(ValidationErrors)
+
+	err := v.Validater.Struct(f)
+	if err != nil {
+		if vs, ok := err.(validator.ValidationErrors); ok {
+			for _, v := range vs {
+				validations[v.Tag()] = fmt.Sprintf("%s is invalid", v.Tag())
+			}
+		}
+	}
+
+	if f.Password != f.PasswordConfirmation {
+		validations["password"] = passwordMismatch
+	}
+
+	if err := v.Repository.Unique(f.Email); err != nil {
+		if err != ErrEmailExists {
+			return errors.Wrap(err, "repository unique")
+		}
+
+		validations["email"] = emailExists
+	}
+
+	if len(validations) > 0 {
+		return validations
+	}
+
+	return nil
 }
