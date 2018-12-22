@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 func TestRegistration(t *testing.T) {
 	t.Log("with initialized server.")
 	{
-		s := NewServer("127.0.0.1:8080", testStorage())
+		s := NewServer("127.0.0.1:8080", ioutil.Discard, testStorage())
 		go func() {
 			assert.Nil(t, s.ListenAndServe())
 		}()
