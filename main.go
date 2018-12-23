@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/pkg/errors"
 	"gopkg.in/go-playground/validator.v9"
@@ -26,18 +29,24 @@ var (
 
 func main() {
 	var (
-		addr = flag.String("addr", ":8080", "address of the http server")
+		addr  = flag.String("addr", ":8080", "address of the http server")
+		debug = flag.Bool("debug", false, "enable debug")
 	)
 
+	stdout := ioutil.Discard
+	if *debug {
+		stdout = os.Stdout
+	}
+
 	r := MemStore{}
-	s := NewServer(*addr, &r)
+	s := NewServer(*addr, stdout, &r)
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatalf("start server: %v", err)
 	}
 }
 
 // NewServer prepares http server.
-func NewServer(addr string, r Repository) *http.Server {
+func NewServer(addr string, stdout io.Writer, r Repository) *http.Server {
 	mux := http.NewServeMux()
 	srv := &Service{
 		Validater: &PlayValidator{
@@ -48,7 +57,7 @@ func NewServer(addr string, r Repository) *http.Server {
 	}
 
 	h := RegistrationHandler{
-		Registrater: srv,
+		Registrater: NewRegistraterWithLog(srv, stdout, os.Stderr),
 	}
 
 	mux.Handle("/registrate", &h)
