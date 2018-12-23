@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,15 +39,16 @@ func main() {
 // NewServer prepares http server.
 func NewServer(addr string, r Repository) *http.Server {
 	mux := http.NewServeMux()
-
-	h := RegistrationHandler{
-		Registrater: &Service{
-			Validater: &PlayValidator{
-				Validater:  validator.New(),
-				Repository: r,
-			},
+	srv := &Service{
+		Validater: &PlayValidator{
+			Validater:  validator.New(),
 			Repository: r,
 		},
+		Repository: r,
+	}
+
+	h := RegistrationHandler{
+		Registrater: srv,
 	}
 
 	mux.Handle("/registrate", &h)
@@ -61,13 +63,13 @@ func NewServer(addr string, r Repository) *http.Server {
 
 // Repository is a data access layer.
 type Repository interface {
-	Unique(email string) error
-	Create(*Form) (*User, error)
+	Unique(ctx context.Context, email string) error
+	Create(context.Context, *Form) (*User, error)
 }
 
 // Validater validation abstraction.
 type Validater interface {
-	Validate(*Form) error
+	Validate(context.Context, *Form) error
 }
 
 // ValidationErrors holds validation errors.
@@ -85,12 +87,12 @@ type Service struct {
 }
 
 // Registrate holds registration domain logic.
-func (s *Service) Registrate(f *Form) (*User, error) {
-	if err := s.Validater.Validate(f); err != nil {
+func (s *Service) Registrate(ctx context.Context, f *Form) (*User, error) {
+	if err := s.Validater.Validate(ctx, f); err != nil {
 		return nil, errors.Wrap(err, "validater validate")
 	}
 
-	user, err := s.Create(f)
+	user, err := s.Create(ctx, f)
 	if err != nil {
 		return nil, errors.Wrap(err, "repository create")
 	}
@@ -100,7 +102,7 @@ func (s *Service) Registrate(f *Form) (*User, error) {
 
 // Registrater abstraction for registration service.
 type Registrater interface {
-	Registrate(*Form) (*User, error)
+	Registrate(context.Context, *Form) (*User, error)
 }
 
 // RegistrationHandler for regisration requests.
@@ -116,7 +118,7 @@ func (h *RegistrationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	u, err := h.Registrate(&f)
+	u, err := h.Registrate(r.Context(), &f)
 	if err != nil {
 		switch v := errors.Cause(err).(type) {
 		case ValidationErrors:
@@ -151,7 +153,7 @@ type MemStore struct {
 }
 
 // Unique checks if a email exists in the database.
-func (s *MemStore) Unique(email string) error {
+func (s *MemStore) Unique(ctx context.Context, email string) error {
 	for _, u := range s.Users {
 		if u.Email == email {
 			return ErrEmailExists
@@ -162,7 +164,7 @@ func (s *MemStore) Unique(email string) error {
 }
 
 // Create creates user in the database for a form.
-func (s *MemStore) Create(f *Form) (*User, error) {
+func (s *MemStore) Create(ctx context.Context, f *Form) (*User, error) {
 	u := User{
 		ID:       len(s.Users) + 1,
 		Password: f.Password,
@@ -181,7 +183,7 @@ type PlayValidator struct {
 }
 
 // Validate implements Validater.
-func (v *PlayValidator) Validate(f *Form) error {
+func (v *PlayValidator) Validate(ctx context.Context, f *Form) error {
 	validations := make(ValidationErrors)
 
 	err := v.Validater.Struct(f)
@@ -197,7 +199,7 @@ func (v *PlayValidator) Validate(f *Form) error {
 		validations["password"] = passwordMismatch
 	}
 
-	if err := v.Repository.Unique(f.Email); err != nil {
+	if err := v.Repository.Unique(ctx, f.Email); err != nil {
 		if err != ErrEmailExists {
 			return errors.Wrap(err, "repository unique")
 		}
