@@ -60,7 +60,7 @@ func NewServer(addr string, stdout io.Writer, r Repository) *http.Server {
 		Registrater: NewRegistraterWithLog(srv, stdout, os.Stderr),
 	}
 
-	mux.Handle("/registrate", &h)
+	mux.Handle("/registrate", &HTTPHandler{&h})
 
 	s := http.Server{
 		Addr:    addr,
@@ -114,17 +114,22 @@ type Registrater interface {
 	Registrate(context.Context, *Form) (*User, error)
 }
 
+// Handler allows to handle requests.
+type Handler interface {
+	Handle(w http.ResponseWriter, r *http.Request) error
+}
+
 // RegistrationHandler for regisration requests.
 type RegistrationHandler struct {
 	Registrater
 }
 
-// ServerHTTP implements http.Handler.
-func (h *RegistrationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// Handle handles registration requests and return error.
+func (h *RegistrationHandler) Handle(w http.ResponseWriter, r *http.Request) error {
 	var f Form
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		return
+		return errors.Wrap(err, "decoder decode")
 	}
 
 	u, err := h.Registrate(r.Context(), &f)
@@ -132,14 +137,32 @@ func (h *RegistrationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		switch v := errors.Cause(err).(type) {
 		case ValidationErrors:
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(v)
+			if err := json.NewEncoder(w).Encode(v); err != nil {
+				return errors.Wrap(err, "validation encoder encode")
+			}
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
+			return errors.Wrap(err, "registrater registrate")
 		}
-		return
 	}
 
-	json.NewEncoder(w).Encode(&u)
+	if err := json.NewEncoder(w).Encode(&u); err != nil {
+		return errors.Wrap(err, "encoder encode")
+	}
+
+	return nil
+}
+
+// HTTPHandler allows to implement ServeHTTP for Handler.
+type HTTPHandler struct {
+	Handler
+}
+
+// ServeHTTP implements http.Handler.
+func (h HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := h.Handle(w, r); err != nil {
+		log.Printf("serve http: %v\n", err)
+	}
 }
 
 // Form is a regisration request.
